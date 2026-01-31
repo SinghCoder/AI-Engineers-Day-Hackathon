@@ -1,0 +1,120 @@
+{
+  "name": "intentmesh",
+  "displayName": "IntentMesh",
+  "description": "Track and analyze AI agent conversations and code intents",
+  "version": "0.0.1",
+  "publisher": "intentmesh",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "intentmesh.importConversation",
+        "title": "IntentMesh: Import Conversation"
+      },
+      {
+        "command": "intentmesh.analyzeWorkspace",
+        "title": "IntentMesh: Analyze Workspace"
+      },
+      {
+        "command": "intentmesh.openConversation",
+        "title": "IntentMesh: Open Conversation"
+      },
+      {
+        "command": "intentmesh.refreshSidebar",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "intentmesh.refreshSidebar",
+          "when": "view == intentmesh.sidebar",
+          "group": "navigation"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "intentmesh",
+          "title": "IntentMesh",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "intentmesh": [
+        {
+          "id": "intentmesh.sidebar",
+          "name": "IntentMesh"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "IntentMesh",
+      "properties": {
+        "intentmesh.llmProvider": {
+          "type": "string",
+          "default": "openai",
+          "enum": [
+            "openai",
+            "anthropic",
+            "ollama"
+          ],
+          "description": "LLM provider for intent analysis"
+        },
+        "intentmesh.openaiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI API key"
+        },
+        "intentmesh.anthropicApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Anthropic API key"
+        },
+        "intentmesh.agentTracePaths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Paths to agent trace/conversation files"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "compile": "tsc -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "dependencies": {
+    "@langchain/core": "^0.3.0",
+    "@langchain/openai": "^0.3.0",
+    "@types/glob": "^8.1.0",
+    "glob": "^13.0.0",
+    "langfuse-langchain": "^3.38.6",
+    "uuid": "^9.0.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/uuid": "^9.0.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.0"
+  }
+}
