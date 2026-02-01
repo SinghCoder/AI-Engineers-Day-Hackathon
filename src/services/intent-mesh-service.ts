@@ -113,7 +113,7 @@ export class IntentMeshService implements vscode.Disposable {
     title: string;
     statement: string;
     tags: string[];
-    confidence: "high" | "medium" | "low";
+    confidence: "high";
     evidence: string;
     sourceUri?: string;
   }>): Promise<ImportResult> {
@@ -126,7 +126,7 @@ export class IntentMeshService implements vscode.Disposable {
           title: intent.title,
           statement: intent.statement,
           tags: intent.tags,
-          strength: intent.confidence === "high" ? "strong" : intent.confidence === "medium" ? "medium" : "weak",
+          strength: "strong", // Only high-confidence intents now, so all are strong
           sources: [
             {
               sourceId: "import",

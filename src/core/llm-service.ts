@@ -8,7 +8,7 @@ export interface ConversationMessage {
 export interface ExtractedIntent {
   title: string;
   statement: string;
-  confidence: "high" | "medium" | "low";
+  confidence: "high"; // Only high-confidence user-stated requirements
   evidence: string;
   tags: string[];
 }

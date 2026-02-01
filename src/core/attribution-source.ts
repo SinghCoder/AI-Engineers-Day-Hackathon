@@ -1,4 +1,4 @@
-import { Disposable } from "vscode";
+import { Disposable } from "./types";
 
 export interface Contributor {
   type: "human" | "ai" | "mixed" | "unknown";

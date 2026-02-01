@@ -32,6 +32,34 @@
         "command": "intentmesh.refreshSidebar",
         "title": "Refresh",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "intentmesh.updateIntent",
+        "title": "IntentMesh: Update Intent"
+      },
+      {
+        "command": "intentmesh.dismissDrift",
+        "title": "IntentMesh: Dismiss Drift"
+      },
+      {
+        "command": "intentmesh.markFalsePositive",
+        "title": "IntentMesh: Mark as False Positive"
+      },
+      {
+        "command": "intentmesh.importFromCursor",
+        "title": "IntentMesh: Import Intents from Cursor Chats"
+      },
+      {
+        "command": "intentmesh.analyzeCurrentFile",
+        "title": "IntentMesh: Check Current File for Drift"
+      },
+      {
+        "command": "intentmesh.analyzeAllLinked",
+        "title": "IntentMesh: Check All Linked Files for Drift"
+      },
+      {
+        "command": "intentmesh.analyzeChanges",
+        "title": "IntentMesh: Analyze Changes (Auto-detect Intents & Drift)"
       }
     ],
     "menus": {
@@ -101,9 +129,14 @@
     "compile": "tsc -p ./",
     "lint": "eslint src --ext ts"
   },
+  "bin": {
+    "intentmesh-mcp": "./out/mcp-stdio.js",
+    "intentmesh-trace": "./out/write-trace.js"
+  },
   "dependencies": {
     "@langchain/core": "^0.3.0",
     "@langchain/openai": "^0.3.0",
+    "@modelcontextprotocol/sdk": "^1.25.3",
     "@types/glob": "^8.1.0",
     "glob": "^13.0.0",
     "langfuse-langchain": "^3.38.6",

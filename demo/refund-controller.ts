@@ -7,12 +7,6 @@ const MAX_REFUND_AMOUNT = 10000;
 
 /**
  * Controller for processing refunds
- * 
- * INTENTS:
- * - Only admins can process refunds
- * - Must validate JWT on every request
- * - No PII in logs
- * - Max refund $10,000
  */
 export class RefundController {
   private refundService: RefundService;
@@ -42,10 +36,8 @@ export class RefundController {
 
       const user = await getUserFromToken(payload);
 
-      // BUG: This violates the "admin-only" intent!
-      // Support role was added without updating the intent
       if (user.role !== "admin" && user.role !== "support") {
-        res.status(403).json({ error: "Only admins can process refunds" });
+        res.status(403).json({ error: "Only admins and support can process refunds" });
         return;
       }
 

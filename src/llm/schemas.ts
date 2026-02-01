@@ -1,11 +1,11 @@
 import { z } from "zod";
 
 export const ExtractedIntentSchema = z.object({
-  title: z.string().describe("Short descriptive name for the intent"),
-  statement: z.string().describe("Normalized requirement statement starting with 'System must...' or similar"),
-  confidence: z.enum(["high", "medium", "low"]).describe("Confidence level based on how explicit the requirement was"),
-  evidence: z.string().describe("Exact quote from the conversation that supports this intent"),
-  tags: z.array(z.string()).describe("Relevant categories like 'auth', 'security', 'payments'"),
+  title: z.string().min(3).max(50).describe("Short descriptive name (2-5 words)"),
+  statement: z.string().min(10).max(200).describe("Requirement statement: 'System must...', 'Only...', or 'Field must...'"),
+  confidence: z.enum(["high"]).describe("Only 'high' confidence - user must explicitly state the requirement"),
+  evidence: z.string().describe("Exact quote from USER message only, not assistant response"),
+  tags: z.array(z.string()).min(1).max(3).describe("1-3 tags from: auth, security, validation, business-logic, data, access-control"),
 });
 
 export const ExtractIntentsResponseSchema = z.object({

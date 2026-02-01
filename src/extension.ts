@@ -4,7 +4,7 @@ import * as path from "path";
 // Core
 import { IIntentStore } from "./core/store";
 import { IAttributionSource } from "./core/attribution-source";
-import { ILLMService } from "./core/llm-service";
+import { ILLMService, ConversationMessage } from "./core/llm-service";
 import { IAnalysisEngine } from "./core/analysis-engine";
 
 // Implementations
@@ -12,11 +12,22 @@ import { JsonFileStore } from "./storage/json-file-store";
 import { AgentTraceFileSource } from "./sources/attribution/agent-trace-file";
 import { LocalJsonChatSource } from "./sources/intent/local-json-chat";
 import { LocalMarkdownChatSource } from "./sources/intent/local-markdown-chat";
+import { CursorChatSource } from "./sources/intent/cursor-chat-source";
 import { LangChainLLMService } from "./llm/llm-service";
 import { AnalysisEngine } from "./engine/analysis-engine";
 
 // Services
 import { IntentMeshService } from "./services/intent-mesh-service";
+
+// Core (new architecture)
+import {
+  IntentMeshCore,
+  IntentMeshCoreDeps,
+  NodeGitOperations,
+  NodeFileReader,
+  AgentTraceConversationLoader,
+  CursorConversationProviderImpl,
+} from "./core";
 
 // UI
 import { DiagnosticsManager } from "./ui/diagnostics";
@@ -24,6 +35,7 @@ import { IntentMeshHoverProvider } from "./ui/hover-provider";
 import { IntentMeshTreeProvider } from "./ui/sidebar/tree-provider";
 
 let intentMeshService: IntentMeshService;
+let intentMeshCore: IntentMeshCore;
 let diagnosticsManager: DiagnosticsManager;
 let outputChannel: vscode.OutputChannel;
 
@@ -97,8 +109,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     { workspaceRoot }
   );
 
-  // Initialize
+  // Initialize legacy service
   await intentMeshService.initialize();
+
+  // Initialize new core architecture with agent-trace support
+  const cursorProvider = new CursorConversationProviderImpl(log);
+  const conversationLoader = new AgentTraceConversationLoader(
+    workspaceRoot,
+    cursorProvider,
+    log
+  );
+
+  const coreDeps: IntentMeshCoreDeps = {
+    store,
+    attributionSource,
+    llmService,
+    analysisEngine,
+    git: new NodeGitOperations(workspaceRoot),
+    fileReader: new NodeFileReader(),
+    conversationLoader,
+  };
+
+  intentMeshCore = new IntentMeshCore(coreDeps, { workspaceRoot, log });
+  await intentMeshCore.initialize();
+  context.subscriptions.push(intentMeshCore);
 
   // Set up UI
   diagnosticsManager = new DiagnosticsManager(intentMeshService);
@@ -126,6 +160,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand("intentmesh.analyzeWorkspace", async () => {
       await analyzeWorkspaceCommand();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("intentmesh.importFromCursor", async () => {
+      await importFromCursorCommand(workspaceRoot, llmService, treeProvider);
     })
   );
 
@@ -172,6 +212,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (args?.eventId) {
         await intentMeshService.resolveDriftEvent(args.eventId, "acknowledged");
         treeProvider.refresh();
+        diagnosticsManager.refresh();
       }
     })
   );
@@ -181,35 +222,58 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (args?.eventId) {
         await intentMeshService.resolveDriftEvent(args.eventId, "false_positive");
         treeProvider.refresh();
+        diagnosticsManager.refresh();
       }
     })
   );
 
-  // Listen for document saves
   context.subscriptions.push(
-    vscode.workspace.onDidSaveTextDocument(async (document) => {
-      log("Document saved:", document.fileName);
-      
-      // Only analyze code files
-      const supportedExtensions = [".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs"];
-      const ext = path.extname(document.fileName);
-      if (!supportedExtensions.includes(ext)) {
-        log("Skipping - unsupported extension:", ext);
+    vscode.commands.registerCommand("intentmesh.updateIntent", async (args) => {
+      if (args?.eventId) {
+        // Get the drift event to find related intent
+        const events = await intentMeshService.getDriftEvents();
+        const event = events.find((e) => e.id === args.eventId);
+        
+        if (event && event.intentIds.length > 0) {
+          const intent = await store.getIntent(event.intentIds[0]);
+          if (intent) {
+            const newStatement = await vscode.window.showInputBox({
+              prompt: "Update intent statement to reflect current implementation",
+              value: intent.statement,
+              placeHolder: "Enter updated intent statement..."
+            });
+            
+            if (newStatement && newStatement !== intent.statement) {
+              await intentMeshService.updateIntent(intent.id, { statement: newStatement });
+              await intentMeshService.resolveDriftEvent(args.eventId, "resolved");
+              treeProvider.refresh();
+              diagnosticsManager.refresh();
+              vscode.window.showInformationMessage(`Intent "${intent.title}" updated.`);
+            }
+          }
+        }
+      }
+    })
+  );
+
+  // Command: Analyze current file for drift
+  context.subscriptions.push(
+    vscode.commands.registerCommand("intentmesh.analyzeCurrentFile", async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        vscode.window.showWarningMessage("No active file to analyze.");
         return;
       }
 
-      // Check if there are intents linked to this file
+      const document = editor.document;
       const fileUri = document.uri.toString();
-      log("Checking links for:", fileUri);
-      const links = await intentMeshService.getLinksForFile(fileUri);
-      log("Found links:", links.length);
       
+      const links = await intentMeshService.getLinksForFile(fileUri);
       if (links.length === 0) {
-        log("No intents linked, skipping analysis");
-        return; // No intents linked, skip analysis
+        vscode.window.showInformationMessage("No intents linked to this file.");
+        return;
       }
 
-      log("Starting drift analysis with intents:", links.map(l => l.intentId));
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
@@ -217,18 +281,77 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           cancellable: false,
         },
         async () => {
-          try {
-            const events = await intentMeshService.analyzeOnSave(document);
-            log("Analysis complete, drift events:", events.length);
-            if (events.length > 0) {
-              log("Drift events:", events.map(e => ({ summary: e.summary, severity: e.severity })));
+          const events = await intentMeshService.analyzeOnSave(document);
+          if (events.length > 0) {
+            vscode.window.showWarningMessage(`Found ${events.length} drift violation(s).`);
+          } else {
+            vscode.window.showInformationMessage("No drift detected.");
+          }
+          treeProvider.refresh();
+          diagnosticsManager.refresh();
+        }
+      );
+    })
+  );
+
+  // Command: Analyze all linked files (for pre-commit hook)
+  context.subscriptions.push(
+    vscode.commands.registerCommand("intentmesh.analyzeAllLinked", async () => {
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "IntentMesh: Analyzing all linked files...",
+          cancellable: false,
+        },
+        async (progress) => {
+          const allIntents = await intentMeshService.getAllIntents();
+          const allLinks = new Set<string>();
+          
+          for (const intent of allIntents) {
+            const links = await store.getLinksForIntent(intent.id);
+            links.forEach(l => allLinks.add(l.fileUri));
+          }
+
+          let totalDrifts = 0;
+          const files = Array.from(allLinks);
+          
+          for (let i = 0; i < files.length; i++) {
+            progress.report({ 
+              message: `Checking ${i + 1}/${files.length}...`,
+              increment: (100 / files.length)
+            });
+            
+            try {
+              const uri = vscode.Uri.parse(files[i]);
+              const doc = await vscode.workspace.openTextDocument(uri);
+              const events = await intentMeshService.analyzeOnSave(doc);
+              totalDrifts += events.length;
+            } catch (error) {
+              log("Failed to analyze:", files[i], error);
             }
-          } catch (error) {
-            log("Analysis failed:", error instanceof Error ? error.message : String(error));
-            log("Stack:", error instanceof Error ? error.stack : "no stack");
+          }
+
+          treeProvider.refresh();
+          diagnosticsManager.refresh();
+          
+          if (totalDrifts > 0) {
+            vscode.window.showWarningMessage(
+              `Found ${totalDrifts} drift violation(s) across ${files.length} files.`
+            );
+          } else {
+            vscode.window.showInformationMessage(
+              `No drift detected in ${files.length} linked files.`
+            );
           }
         }
       );
+    })
+  );
+
+  // NEW COMMAND: Analyze Changes (uses agent-trace for auto-linking)
+  context.subscriptions.push(
+    vscode.commands.registerCommand("intentmesh.analyzeChanges", async () => {
+      await analyzeChangesCommand(workspaceRoot, treeProvider, diagnosticsManager);
     })
   );
 
@@ -286,6 +409,213 @@ async function importConversationCommand(workspaceRoot: string, llmService: ILLM
 
 async function analyzeWorkspaceCommand(): Promise<void> {
   vscode.window.showInformationMessage("Workspace analysis coming soon!");
+}
+
+/**
+ * NEW: Analyze Changes command
+ * Uses agent-trace to automatically find conversations and link intents
+ */
+async function analyzeChangesCommand(
+  workspaceRoot: string,
+  treeProvider: IntentMeshTreeProvider,
+  diagnosticsManager: DiagnosticsManager
+): Promise<void> {
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: "IntentMesh: Analyzing changes...",
+      cancellable: false,
+    },
+    async (progress) => {
+      progress.report({ message: "Getting changed files..." });
+
+      // Step 1: Analyze for drift
+      const result = await intentMeshCore.analyzeChanges();
+
+      if (result.filesAnalyzed === 0) {
+        vscode.window.showInformationMessage("No changes detected in workspace.");
+        return;
+      }
+
+      progress.report({ message: `Checked ${result.filesAnalyzed} files...` });
+
+      // Step 2: Handle drifts
+      if (result.drifts.length > 0) {
+        treeProvider.refresh();
+        diagnosticsManager.refresh();
+
+        const action = await vscode.window.showWarningMessage(
+          `Found ${result.drifts.length} drift violation(s). Fix them before capturing new intents.`,
+          "Show Drifts",
+          "Dismiss All"
+        );
+
+        if (action === "Dismiss All") {
+          for (const drift of result.drifts) {
+            await intentMeshCore.resolveDrift(drift.id, "dismiss");
+          }
+          treeProvider.refresh();
+          diagnosticsManager.refresh();
+          vscode.window.showInformationMessage("All drifts dismissed. Run again to capture intents.");
+        }
+        return;
+      }
+
+      // Step 3: No drifts - offer to capture intents
+      if (result.canCapture && result.pendingConversations && result.pendingConversations.length > 0) {
+        progress.report({ message: "Finding AI conversations..." });
+
+        const convoItems = result.pendingConversations.map(c => ({
+          label: c.name ?? `Conversation ${c.id.slice(0, 8)}`,
+          description: `${c.messageCount} messages`,
+          picked: true,
+          id: c.id,
+        }));
+
+        const selected = await vscode.window.showQuickPick(convoItems, {
+          canPickMany: true,
+          title: "Capture intents from these AI conversations?",
+          placeHolder: "Select conversations to extract intents from...",
+        });
+
+        if (selected && selected.length > 0) {
+          progress.report({ message: "Extracting intents..." });
+
+          const captureResult = await intentMeshCore.captureIntents({
+            conversationIds: selected.map(s => s.id),
+            autoLink: true,
+          });
+
+          treeProvider.refresh();
+
+          if (captureResult.errors.length > 0) {
+            vscode.window.showErrorMessage(`Errors: ${captureResult.errors.join(", ")}`);
+          } else {
+            vscode.window.showInformationMessage(
+              `Captured ${captureResult.intentsImported} intents with ${captureResult.linksCreated} auto-links.`
+            );
+          }
+        }
+      } else {
+        vscode.window.showInformationMessage(
+          `No drift detected. ${result.intentsChecked} intents checked across ${result.filesAnalyzed} files.`
+        );
+      }
+    }
+  );
+}
+
+async function importFromCursorCommand(
+  workspaceRoot: string, 
+  llmService: ILLMService,
+  treeProvider: IntentMeshTreeProvider
+): Promise<void> {
+  const cursorSource = new CursorChatSource(llmService, workspaceRoot, log);
+
+  if (!(await cursorSource.isAvailable())) {
+    vscode.window.showErrorMessage("Cursor data directory not found.");
+    return;
+  }
+
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: "IntentMesh: Scanning Cursor chats...",
+      cancellable: false,
+    },
+    async (progress) => {
+      progress.report({ message: "Finding conversations..." });
+
+      // Get ALL sessions, not just filtered ones
+      const allSessions = await cursorSource.extractSessions();
+      log("Found total Cursor sessions:", allSessions.length);
+
+      if (allSessions.length === 0) {
+        vscode.window.showWarningMessage("No Cursor conversations found.");
+        return;
+      }
+
+      // Pre-select sessions that match current workspace by path
+      const normalizedWorkspace = workspaceRoot.toLowerCase();
+      const workspaceBasename = path.basename(workspaceRoot).toLowerCase();
+      
+      log("Current workspace:", workspaceRoot, "basename:", workspaceBasename);
+      
+      // Build items for quick pick
+      interface SessionPickItem extends vscode.QuickPickItem {
+        session: { composerId: string; messages: ConversationMessage[] };
+      }
+      
+      const items: SessionPickItem[] = allSessions
+        .filter(s => s.messages.length >= 2) // At least one exchange
+        .map(s => {
+          // Match if the project path matches the workspace
+          const normalizedProject = (s.projectPath || "").toLowerCase();
+          const projectBasename = s.projectPath ? path.basename(s.projectPath).toLowerCase() : "";
+          
+          // Multi-level matching:
+          // 1. Exact substring match
+          // 2. Same basename
+          // 3. If projectPath is empty, less strict matching
+          const matchesWorkspace = 
+            (normalizedProject.length > 0 && 
+              (normalizedWorkspace.includes(normalizedProject) || 
+               normalizedProject.includes(normalizedWorkspace))) ||
+            (projectBasename && projectBasename === workspaceBasename) ||
+            (projectBasename && normalizedWorkspace.includes(projectBasename));
+          
+          log(`Session "${s.name}": projectPath="${s.projectPath}", matches=${matchesWorkspace}`);
+          
+          return {
+            label: s.name || `Session ${s.composerId.slice(0, 8)}`,
+            description: `${s.messages.length} messages${matchesWorkspace ? " ★ this workspace" : ""}`,
+            detail: s.projectPath || "(project path unknown)",
+            session: { composerId: s.composerId, messages: s.messages },
+            picked: matchesWorkspace || undefined,
+          } as SessionPickItem;
+        });
+
+      const selected = await vscode.window.showQuickPick(items, {
+        canPickMany: true,
+        title: "Select Cursor conversations to extract intents from",
+        placeHolder: "Pick conversations...",
+      });
+
+      if (!selected || selected.length === 0) {
+        return;
+      }
+
+      progress.report({ message: "Extracting intents with LLM..." });
+
+      let totalIntents = 0;
+
+      for (const item of selected) {
+        try {
+          const extracted = await llmService.extractIntents(item.session.messages);
+          
+          const result = await intentMeshService.importIntents(
+            extracted.map(intent => ({
+              title: intent.title,
+              statement: intent.statement,
+              tags: intent.tags,
+              confidence: intent.confidence,
+              evidence: intent.evidence,
+              sourceUri: `cursor://composer/${item.session.composerId}`,
+            }))
+          );
+
+          totalIntents += result.intentsImported;
+        } catch (error) {
+          log("Failed to extract from session:", item.session.composerId, error);
+        }
+      }
+
+      treeProvider.refresh();
+      vscode.window.showInformationMessage(
+        `Imported ${totalIntents} intents from ${selected.length} Cursor conversations.`
+      );
+    }
+  );
 }
 
 function getIntentDetailsHtml(intent: any): string {

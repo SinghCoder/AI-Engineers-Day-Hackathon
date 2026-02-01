@@ -32,6 +32,7 @@ export class IntentMeshHoverProvider implements vscode.HoverProvider {
     const contents = new vscode.MarkdownString();
     contents.isTrusted = true;
     contents.supportHtml = true;
+    contents.supportThemeIcons = true;
 
     for (const event of relevantEvents) {
       // Get the related intent
