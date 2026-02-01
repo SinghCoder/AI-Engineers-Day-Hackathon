@@ -7,6 +7,7 @@ import { IAnalysisEngine, AnalysisResult } from "../core/analysis-engine";
 import { IntentNode, createIntentNode, IntentLink } from "../models/intent";
 import { DriftEvent } from "../models/drift";
 import { IntentLinker } from "../engine/intent-linker";
+import { ConversationLoader } from "../core/intent-mesh-core";
 
 export interface ImportResult {
   intentsImported: number;
@@ -16,6 +17,7 @@ export interface ImportResult {
 
 export interface IntentMeshServiceConfig {
   workspaceRoot: string;
+  conversationLoader?: ConversationLoader;
 }
 
 export class IntentMeshService implements vscode.Disposable {
@@ -35,7 +37,7 @@ export class IntentMeshService implements vscode.Disposable {
     private readonly analysisEngine: IAnalysisEngine,
     private readonly config: IntentMeshServiceConfig
   ) {
-    this.linker = new IntentLinker(store, attributionSource);
+    this.linker = new IntentLinker(store, attributionSource, config.conversationLoader);
   }
 
   async initialize(): Promise<void> {

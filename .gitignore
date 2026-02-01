@@ -1,5 +1,10 @@
 node_modules/
 out/
+dist/
 .intentmesh/
+.agent-trace/
 *.vsix
 .DS_Store
+.env
+.env.local
+*.log

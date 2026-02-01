@@ -22,7 +22,6 @@ interface ComposerData {
 
 export class CursorConversationProviderImpl implements CursorConversationProvider {
   private cursorRoot: string;
-  private bubbleCache: Map<string, { type: number; text: string }> | null = null;
   private log: LogFn;
 
   constructor(logFn?: LogFn) {
@@ -67,38 +66,48 @@ export class CursorConversationProviderImpl implements CursorConversationProvide
     }
   }
 
-  private async ensureBubbleCache(): Promise<void> {
-    if (this.bubbleCache) return;
-
+  /**
+   * Load bubbles for a specific conversation directly from DB
+   * This avoids the cache limit issue (47k+ bubbles total)
+   */
+  private loadBubblesForConversation(composerId: string): Map<string, { type: number; text: string }> {
     const globalDbPath = path.join(this.cursorRoot, "User", "globalStorage", "state.vscdb");
+    const bubbles = new Map<string, { type: number; text: string }>();
     
     try {
-      await fs.access(globalDbPath);
-      
-      const allBubbleRows = this.runSqlite(
+      const rows = this.runSqlite(
         globalDbPath,
-        `SELECT key, json_extract(value, '$.type') as type, json_extract(value, '$.text') as text FROM cursorDiskKV WHERE key LIKE 'bubbleId:%' LIMIT 10000`
+        `SELECT key, json_extract(value, '$.type') as type, json_extract(value, '$.text') as text FROM cursorDiskKV WHERE key LIKE 'bubbleId:${composerId}:%'`
       );
 
-      this.bubbleCache = new Map();
-      for (const b of allBubbleRows) {
-        this.bubbleCache.set(b.key, { type: b.type, text: b.text });
+      for (const b of rows) {
+        bubbles.set(b.key, { type: b.type, text: b.text });
       }
 
-      this.log(`Cached ${this.bubbleCache.size} Cursor bubbles`);
     } catch {
-      this.bubbleCache = new Map();
+      // Bubbles not found - conversation may be incomplete
     }
+    
+    return bubbles;
   }
+
+
 
   async getConversationById(composerId: string): Promise<{
     messages: ConversationMessage[];
     name?: string;
     projectPath?: string;
   } | null> {
-    await this.ensureBubbleCache();
+    return this.tryGetConversation(composerId);
+  }
 
+  private async tryGetConversation(composerId: string): Promise<{
+    messages: ConversationMessage[];
+    name?: string;
+    projectPath?: string;
+  } | null> {
     const globalDbPath = path.join(this.cursorRoot, "User", "globalStorage", "state.vscdb");
+    this.log(`🔍 Looking for conversation ${composerId} in ${globalDbPath}`);
 
     try {
       // Get composer data
@@ -108,21 +117,28 @@ export class CursorConversationProviderImpl implements CursorConversationProvide
       );
 
       if (composerRows.length === 0) {
+        this.log(`❌ No composerData found for ${composerId}`);
         return null;
       }
 
       const data = JSON.parse(composerRows[0].value) as ComposerData;
       const headers = data.fullConversationHeadersOnly ?? [];
+      this.log(`📋 Found ${headers.length} bubble headers for conversation`);
 
       if (headers.length === 0) {
+        this.log(`❌ No bubble headers in conversation`);
         return null;
       }
 
-      // Build messages from bubble cache
+      // Load bubbles directly for this conversation (avoids cache limit issue)
+      const bubbles = this.loadBubblesForConversation(composerId);
+      this.log(`💬 Loaded ${bubbles.size} bubbles from DB`);
+
+      // Build messages from bubbles
       const messages: ConversationMessage[] = [];
       for (const header of headers.slice(0, 50)) { // Limit to 50 messages
         const bubbleKey = `bubbleId:${composerId}:${header.bubbleId}`;
-        const bubble = this.bubbleCache?.get(bubbleKey);
+        const bubble = bubbles.get(bubbleKey);
         
         if (bubble && bubble.text?.trim()) {
           const role = bubble.type === 1 ? "user" : "assistant";
@@ -131,16 +147,18 @@ export class CursorConversationProviderImpl implements CursorConversationProvide
       }
 
       if (messages.length < 2) {
+        this.log(`❌ Only ${messages.length} messages found (need at least 2)`);
         return null;
       }
+      
+      this.log(`🔗 Loaded Cursor conversation: "${data.name || composerId.slice(0, 8)}" (${messages.length} messages)`);
 
       return {
         messages,
         name: data.name,
         projectPath: data.projectPath,
       };
-    } catch (error) {
-      this.log(`Failed to load conversation ${composerId}:`, error);
+    } catch {
       return null;
     }
   }

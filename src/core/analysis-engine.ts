@@ -9,6 +9,7 @@ export interface FileChange {
 export interface AnalysisOptions {
   checkIntentViolations?: boolean;
   useCache?: boolean;
+  diff?: string; // Git diff for the file (more efficient than full file)
 }
 
 export interface AnalysisWarning {

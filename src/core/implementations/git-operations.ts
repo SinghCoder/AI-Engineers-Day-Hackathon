@@ -66,6 +66,21 @@ export class NodeGitOperations implements GitOperations {
     }
   }
 
+  async getFileDiff(filePath: string, options?: { since?: string; context?: number }): Promise<string> {
+    try {
+      const since = options?.since ?? "HEAD";
+      const context = options?.context ?? 5; // Lines of context around changes
+      const relativePath = filePath.replace(`${this.workspaceRoot}/`, "");
+      const result = execSync(`git diff -U${context} ${since} -- "${relativePath}"`, {
+        cwd: this.workspaceRoot,
+        encoding: "utf-8",
+      });
+      return result;
+    } catch {
+      return "";
+    }
+  }
+
   async getCurrentRevision(): Promise<string> {
     try {
       return execSync("git rev-parse HEAD", {

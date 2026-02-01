@@ -99,20 +99,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log("Langfuse tracing enabled at:", langfuseBaseUrl);
   }
 
-  const analysisEngine: IAnalysisEngine = new AnalysisEngine(store, attributionSource, llmService, log);
-
-  intentMeshService = new IntentMeshService(
-    store,
-    attributionSource,
-    llmService,
-    analysisEngine,
-    { workspaceRoot }
-  );
-
-  // Initialize legacy service
-  await intentMeshService.initialize();
-
-  // Initialize new core architecture with agent-trace support
+  // Initialize new core architecture with agent-trace support first
   const cursorProvider = new CursorConversationProviderImpl(log);
   const conversationLoader = new AgentTraceConversationLoader(
     workspaceRoot,
@@ -120,6 +107,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log
   );
 
+  const analysisEngine: IAnalysisEngine = new AnalysisEngine(
+    store,
+    attributionSource,
+    llmService,
+    log,
+    conversationLoader
+  );
+
+  intentMeshService = new IntentMeshService(
+    store,
+    attributionSource,
+    llmService,
+    analysisEngine,
+    { workspaceRoot, conversationLoader }
+  );
+
+  // Initialize legacy service
+  await intentMeshService.initialize();
+
+  // Set up core service
   const coreDeps: IntentMeshCoreDeps = {
     store,
     attributionSource,
@@ -137,6 +144,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Set up UI
   diagnosticsManager = new DiagnosticsManager(intentMeshService);
   context.subscriptions.push(diagnosticsManager);
+  
+  // Load existing drift diagnostics on startup
+  await diagnosticsManager.refresh();
 
   // Register hover provider
   const hoverProvider = new IntentMeshHoverProvider(intentMeshService, store);
@@ -170,8 +180,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("intentmesh.refreshSidebar", () => {
-      treeProvider.refresh();
+    vscode.commands.registerCommand("intentmesh.refreshSidebar", async () => {
+      // Reload from disk first, then refresh tree and diagnostics
+      await store.load();
+      await treeProvider.refresh();
+      await diagnosticsManager.refresh();
     })
   );
 
@@ -424,20 +437,62 @@ async function analyzeChangesCommand(
     {
       location: vscode.ProgressLocation.Notification,
       title: "IntentMesh: Analyzing changes...",
-      cancellable: false,
+      cancellable: true,
     },
-    async (progress) => {
+    async (progress, token) => {
+      // Step 1: Get changed files (fast)
       progress.report({ message: "Getting changed files..." });
+      const state = await intentMeshCore.getState();
+      const files = await (intentMeshCore as any).deps.git.getChangedFiles();
 
-      // Step 1: Analyze for drift
-      const result = await intentMeshCore.analyzeChanges();
-
-      if (result.filesAnalyzed === 0) {
+      if (files.length === 0) {
         vscode.window.showInformationMessage("No changes detected in workspace.");
         return;
       }
 
+      // Check for cancellation
+      if (token.isCancellationRequested) {
+        vscode.window.showInformationMessage("Analysis cancelled.");
+        return;
+      }
+
+      // Step 2: Check for drift (slow - LLM calls)
+      progress.report({ message: `Checking ${files.length} file(s) for drift...` });
+      const driftResult = await intentMeshCore.detectDrift(files);
+
+      if (token.isCancellationRequested) {
+        vscode.window.showInformationMessage("Analysis cancelled.");
+        return;
+      }
+
+      progress.report({ message: `Checked ${files.length} files, finding conversations...` });
+
+      // Step 3: Load conversations if no drifts
+      let pendingConversations: { id: string; name?: string; messageCount: number }[] = [];
+      if (driftResult.drifts.length === 0) {
+        const convos = await (intentMeshCore as any).deps.conversationLoader?.loadConversationsForFiles(files) ?? [];
+        pendingConversations = convos.map((c: any) => ({
+          id: c.id,
+          name: c.name,
+          messageCount: c.messages.length,
+        }));
+      }
+
+      const result = {
+        drifts: driftResult.drifts,
+        filesAnalyzed: driftResult.filesAnalyzed,
+        intentsChecked: driftResult.intentsChecked,
+        canCapture: driftResult.drifts.length === 0,
+        pendingConversations,
+      };
+
       progress.report({ message: `Checked ${result.filesAnalyzed} files...` });
+
+      // Check for cancellation
+      if (token.isCancellationRequested) {
+        vscode.window.showInformationMessage("Analysis cancelled.");
+        return;
+      }
 
       // Step 2: Handle drifts
       if (result.drifts.length > 0) {
@@ -479,6 +534,12 @@ async function analyzeChangesCommand(
         });
 
         if (selected && selected.length > 0) {
+          // Check for cancellation before LLM call
+          if (token.isCancellationRequested) {
+            vscode.window.showInformationMessage("Analysis cancelled.");
+            return;
+          }
+
           progress.report({ message: "Extracting intents..." });
 
           const captureResult = await intentMeshCore.captureIntents({

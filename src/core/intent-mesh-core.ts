@@ -188,8 +188,10 @@ export class IntentMeshCore implements Disposable {
 
   /**
    * Detect drift in specified files against existing intents
+   * Uses git diffs for efficiency (only checks changed code)
+   * Processes files in parallel batches for speed
    */
-  async detectDrift(files: string[]): Promise<{
+  async detectDrift(files: string[], batchSize = 5): Promise<{
     drifts: DriftEvent[];
     filesAnalyzed: number;
     intentsChecked: number;
@@ -197,11 +199,28 @@ export class IntentMeshCore implements Disposable {
     const allDrifts: DriftEvent[] = [];
     let totalIntentsChecked = 0;
 
-    for (const file of files) {
-      const fileUri = file.startsWith("file://") ? file : `file://${file}`;
-      const result = await this.deps.analysisEngine.analyzeFile(fileUri);
-      allDrifts.push(...result.driftEvents);
-      totalIntentsChecked += result.intentsChecked;
+    // Process files in batches for parallel execution
+    for (let i = 0; i < files.length; i += batchSize) {
+      const batch = files.slice(i, i + batchSize);
+      
+      // Process batch in parallel
+      const results = await Promise.all(
+        batch.map(async (file) => {
+          const fileUri = file.startsWith("file://") ? file : `file://${file}`;
+          const filePath = file.replace(/^file:\/\//, "");
+          
+          // Get diff for this file (more efficient than sending whole file)
+          const diff = await this.deps.git.getFileDiff(filePath);
+          
+          return this.deps.analysisEngine.analyzeFile(fileUri, { diff });
+        })
+      );
+
+      // Collect results
+      for (const result of results) {
+        allDrifts.push(...result.driftEvents);
+        totalIntentsChecked += result.intentsChecked;
+      }
     }
 
     return {
@@ -241,19 +260,14 @@ export class IntentMeshCore implements Disposable {
     let intentsImported = 0;
     let linksCreated = 0;
 
-    // Load conversations
-    const conversations: LoadedConversation[] = [];
-    if (options?.conversationIds) {
-      for (const id of options.conversationIds) {
-        const convo = await this.deps.conversationLoader.loadConversationById(id);
-        if (convo) conversations.push(convo);
-      }
-    } else {
-      // Load from recent files
-      const files = await this.deps.git.getChangedFiles();
-      const convos = await this.deps.conversationLoader.loadConversationsForFiles(files);
-      conversations.push(...convos);
-    }
+    // Load conversations - always use loadConversationsForFiles to get fileRanges from trace
+    const files = await this.deps.git.getChangedFiles();
+    const allConvos = await this.deps.conversationLoader.loadConversationsForFiles(files);
+    
+    // Filter by conversationIds if specified
+    const conversations = options?.conversationIds
+      ? allConvos.filter(c => options.conversationIds!.includes(c.id))
+      : allConvos;
 
     // Extract intents from each conversation
     for (const convo of conversations) {

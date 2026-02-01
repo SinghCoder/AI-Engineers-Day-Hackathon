@@ -72,7 +72,6 @@ export interface CursorConversationProvider {
 export class AgentTraceConversationLoader implements ConversationLoader {
   private traceFilePath: string;
   private mappings: FileConversationMapping[] = [];
-  private loaded = false;
   private log: LogFn;
 
   constructor(
@@ -86,9 +85,11 @@ export class AgentTraceConversationLoader implements ConversationLoader {
 
   /**
    * Load and parse the traces.jsonl file
+   * Always reloads to pick up new traces (file may change between calls)
    */
   private async loadTraces(): Promise<void> {
-    if (this.loaded) return;
+    // Clear previous mappings and reload fresh
+    this.mappings = [];
 
     try {
       const content = await fs.readFile(this.traceFilePath, "utf-8");
@@ -103,11 +104,11 @@ export class AgentTraceConversationLoader implements ConversationLoader {
         }
       }
 
-      this.loaded = true;
-      this.log(`Loaded ${this.mappings.length} file-conversation mappings from agent-trace`);
-    } catch (error) {
-      this.log("Agent trace file not found or not readable:", this.traceFilePath);
-      this.loaded = true; // Mark as loaded to avoid retry
+      if (this.mappings.length > 0) {
+        this.log(`📂 Found ${this.mappings.length} AI-authored file(s) in .agent-trace`);
+      }
+    } catch {
+      // No agent-trace file yet - this is normal for new workspaces
     }
   }
 
@@ -236,17 +237,25 @@ export class AgentTraceConversationLoader implements ConversationLoader {
 
     // Load actual conversation content
     const result: LoadedConversation[] = [];
+    
+    this.log(`🔍 Found ${conversationMap.size} conversation(s) in trace for ${normalizedFiles.size} file(s)`);
 
     for (const [id, info] of conversationMap) {
+      this.log(`🔗 Loading conversation: ${id}`);
       const loaded = await this.loadConversationById(id);
       if (loaded) {
+        this.log(`✅ Loaded conversation "${loaded.name}" with ${loaded.messages.length} messages`);
         // Merge file ranges from trace
         loaded.fileRanges = info.fileRanges;
         result.push(loaded);
+      } else {
+        this.log(`❌ Failed to load conversation: ${id}`);
       }
     }
 
-    this.log(`Found ${result.length} conversations for ${files.length} files`);
+    if (result.length > 0) {
+      this.log(`💬 Matched ${result.length} AI conversation(s) to changed files`);
+    }
     return result;
   }
 
@@ -255,13 +264,11 @@ export class AgentTraceConversationLoader implements ConversationLoader {
    */
   async loadConversationById(id: string): Promise<LoadedConversation | null> {
     if (!this.conversationProvider) {
-      this.log("No conversation provider configured");
       return null;
     }
 
     const convo = await this.conversationProvider.getConversationById(id);
     if (!convo) {
-      this.log(`Conversation ${id} not found`);
       return null;
     }
 

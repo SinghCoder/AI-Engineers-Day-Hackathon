@@ -39,11 +39,11 @@ export class IntentMeshTreeProvider implements vscode.TreeDataProvider<TreeItemD
   private async loadData(): Promise<void> {
     this.intents = await this.service.getAllIntents();
     this.driftEvents = await this.service.getDriftEvents();
-    this.refresh();
+    this._onDidChangeTreeData.fire(undefined);
   }
 
-  refresh(): void {
-    this._onDidChangeTreeData.fire(undefined);
+  async refresh(): Promise<void> {
+    await this.loadData();
   }
 
   getTreeItem(element: TreeItemData): vscode.TreeItem {

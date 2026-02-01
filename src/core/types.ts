@@ -23,6 +23,7 @@ export interface FileReader {
 // Git operations interface
 export interface GitOperations {
   getChangedFiles(options?: { since?: string; staged?: boolean }): Promise<string[]>;
+  getFileDiff(filePath: string, options?: { since?: string; context?: number }): Promise<string>;
   getDiff(options?: { since?: string }): Promise<string>;
   getCurrentRevision(): Promise<string>;
   getWorkspaceRoot(): string;

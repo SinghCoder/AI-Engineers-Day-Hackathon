@@ -9,6 +9,7 @@ import { IAttributionSource } from "../core/attribution-source";
 import { ILLMService } from "../core/llm-service";
 import { DriftDetector, LogFn } from "./drift-detector";
 import { DriftEvent } from "../models/drift";
+import { ConversationLoader } from "../core/intent-mesh-core";
 
 export class AnalysisEngine implements IAnalysisEngine {
   private detector: DriftDetector;
@@ -17,9 +18,10 @@ export class AnalysisEngine implements IAnalysisEngine {
     private readonly store: IIntentStore,
     private readonly attributionSource: IAttributionSource,
     private readonly llmService: ILLMService,
-    logFn?: LogFn
+    logFn?: LogFn,
+    conversationLoader?: ConversationLoader
   ) {
-    this.detector = new DriftDetector(store, attributionSource, llmService, logFn);
+    this.detector = new DriftDetector(store, attributionSource, llmService, logFn, conversationLoader);
   }
 
   async analyzeFile(fileUri: string, options?: AnalysisOptions): Promise<AnalysisResult> {
@@ -31,8 +33,8 @@ export class AnalysisEngine implements IAnalysisEngine {
       await this.store.clearDriftEvents(fileUri);
     }
 
-    // Run detection
-    const { events, intentsChecked } = await this.detector.detectInFile(fileUri);
+    // Run detection (pass diff if available for efficiency)
+    const { events, intentsChecked } = await this.detector.detectInFile(fileUri, options?.diff);
 
     // Save new drift events
     for (const event of events) {

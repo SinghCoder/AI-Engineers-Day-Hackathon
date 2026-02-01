@@ -46,9 +46,14 @@ export class DiagnosticsManager implements vscode.Disposable {
    * Refresh all diagnostics from the store
    */
   async refresh(): Promise<void> {
-    this.diagnosticCollection.clear();
+    // Reload store from disk first to get latest drift events
+    await (this.service as any).store?.load?.();
+    
     const events = await this.service.getDriftEvents();
     const openEvents = events.filter((e) => e.status === "open");
+    
+    // Clear and re-populate (don't clear first to avoid flicker)
+    this.diagnosticCollection.clear();
     this.handleDriftEvents(openEvents);
   }
 

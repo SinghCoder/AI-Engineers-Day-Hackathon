@@ -38,7 +38,7 @@ async function main() {
   
   const llmService = new LangChainLLMService({
     provider: "openai",
-    model: process.env.INTENTMESH_MODEL || "gpt-4o-mini",
+    model: process.env.INTENTMESH_MODEL || "gpt-5-mini",
     apiKey: process.env.OPENAI_API_KEY || "",
   });
 
@@ -84,7 +84,10 @@ async function main() {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     const result = await intentMesh.handleToolCall(name, args as Record<string, unknown>);
-    return result;
+    return {
+      content: result.content,
+      isError: result.isError,
+    };
   });
 
   // List resources

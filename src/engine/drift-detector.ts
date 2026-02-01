@@ -6,6 +6,7 @@ import { IAttributionSource } from "../core/attribution-source";
 import { IntentNode, IntentLink } from "../models/intent";
 import { DriftEvent, createDriftEvent, Range } from "../models/drift";
 import { IntentLinker } from "./intent-linker";
+import { ConversationLoader } from "../core/intent-mesh-core";
 
 export interface DriftDetectionResult {
   events: DriftEvent[];
@@ -22,9 +23,10 @@ export class DriftDetector {
     private readonly store: IIntentStore,
     private readonly attributionSource: IAttributionSource,
     private readonly llmService: ILLMService,
-    logFn?: LogFn
+    logFn?: LogFn,
+    conversationLoader?: ConversationLoader
   ) {
-    this.linker = new IntentLinker(store, attributionSource);
+    this.linker = new IntentLinker(store, attributionSource, conversationLoader);
     this.logFn = logFn ?? ((msg, ...args) => console.log(`[DriftDetector] ${msg}`, ...args));
   }
 
@@ -35,44 +37,43 @@ export class DriftDetector {
 
   /**
    * Detect drift in a single file
+   * @param fileUri - The file to check
+   * @param diff - Optional git diff for the file (more efficient than full file)
    */
-  async detectInFile(fileUri: string): Promise<DriftDetectionResult> {
-    this.log("detectInFile called with:", fileUri);
+  async detectInFile(fileUri: string, diff?: string): Promise<DriftDetectionResult> {
+    const fileName = fileUri.split("/").pop() || fileUri;
     
     // Get intents that apply to this file
     const intents = await this.linker.getIntentsForFile(fileUri);
-    this.log("Found intents for file:", intents.length, intents.map(i => i.id));
     
     if (intents.length === 0) {
-      this.log("No intents found, returning empty");
       return { events: [], intentsChecked: 0 };
     }
+    
+    this.log(`📋 Checking ${fileName} against ${intents.length} intent(s)`);
 
-    // Read the file content
     const filePath = fileUri.replace(/^file:\/\//, "");
+    const language = this.getLanguage(filePath);
+
+    // If we have a diff, use it (more efficient)
+    if (diff && diff.trim()) {
+      return this.detectInDiff(fileUri, diff, intents, language);
+    }
+
+    // Fall back to reading full file
     let content: string;
     try {
       content = await fs.readFile(filePath, "utf-8");
-      this.log("Read file content, length:", content.length);
     } catch (error) {
-      this.log("Failed to read file:", error);
+      this.log(`⚠️  Could not read ${fileName}`);
       return { events: [], intentsChecked: 0 };
     }
 
-    // Determine language from extension
-    const language = this.getLanguage(filePath);
-
     // Get links for this file to know which ranges to check
     const links = await this.store.getLinksForFile(fileUri);
-    this.log("Found links:", links.length);
     
     // Group intents by the code ranges they apply to
     const rangesToCheck = this.groupByRanges(intents, links, content);
-    this.log("Ranges to check:", rangesToCheck.length, rangesToCheck.map(r => ({ 
-      startLine: r.startLine, 
-      intents: r.intents.map(i => i.id),
-      codeLength: r.code.length 
-    })));
 
     const allEvents: DriftEvent[] = [];
 
@@ -85,17 +86,12 @@ export class DriftDetector {
         language,
       };
 
-      this.log("Calling LLM with params:", {
-        intentCount: rangeIntents.length,
-        intents: rangeIntents.map(i => ({ id: i.id, title: i.title })),
-        codePreview: code.substring(0, 200) + "...",
-        filePath,
-        language
-      });
-
       try {
         const analysis = await this.llmService.detectDrift(params);
-        this.log("LLM response - violations:", analysis.violations.length);
+        
+        if (analysis.violations.length > 0) {
+          this.log(`🚨 Found ${analysis.violations.length} violation(s) in ${fileName}`);
+        }
 
         // Convert violations to DriftEvents
         for (const violation of analysis.violations) {
@@ -211,5 +207,116 @@ export class DriftDetector {
       ".php": "php",
     };
     return langMap[ext] ?? "text";
+  }
+
+  /**
+   * Detect drift using git diff output (more efficient than full file)
+   */
+  private async detectInDiff(
+    fileUri: string,
+    diff: string,
+    intents: IntentNode[],
+    language: string
+  ): Promise<DriftDetectionResult> {
+    const fileName = fileUri.split("/").pop() || fileUri;
+    const filePath = fileUri.replace(/^file:\/\//, "");
+    
+    // Extract the changed code from the diff (+ lines with context)
+    const changedCode = this.extractChangedCodeFromDiff(diff);
+    
+    if (!changedCode.trim()) {
+      return { events: [], intentsChecked: intents.length };
+    }
+
+    this.log(`🔍 Checking diff for ${fileName} (${changedCode.split("\n").length} lines)`);
+
+    const params: DriftCheckParams = {
+      intents,
+      code: changedCode,
+      filePath,
+      language,
+    };
+
+    try {
+      const analysis = await this.llmService.detectDrift(params);
+      
+      if (analysis.violations.length > 0) {
+        this.log(`🚨 Found ${analysis.violations.length} violation(s) in ${fileName}`);
+      }
+
+      const allEvents: DriftEvent[] = [];
+
+      for (const violation of analysis.violations) {
+        const intent = intents.find((i) => i.id === violation.intentId);
+
+        const event = createDriftEvent({
+          fileUri,
+          range: {
+            startLine: violation.lineStart,
+            endLine: violation.lineEnd,
+            startCharacter: 0,
+            endCharacter: 0,
+          },
+          severity: violation.severity,
+          summary: violation.summary,
+          explanation: violation.explanation,
+          intentIds: intent ? [intent.id] : [],
+          suggestedFix: violation.suggestedFix,
+          confidence: violation.confidence,
+        });
+
+        allEvents.push(event);
+      }
+
+      return { events: allEvents, intentsChecked: intents.length };
+    } catch (error) {
+      this.log(`⚠️  Error analyzing diff for ${fileName}:`, error);
+      return { events: [], intentsChecked: intents.length };
+    }
+  }
+
+  /**
+   * Extract the new/changed code from a git diff
+   * Returns lines with absolute line numbers prefixed (e.g., "42: const x = 1")
+   */
+  private extractChangedCodeFromDiff(diff: string): string {
+    const diffLines = diff.split("\n");
+    const result: string[] = [];
+    
+    let currentLine = 0; // Tracks current line number in the new file
+    
+    for (const line of diffLines) {
+      // Parse hunk headers to get line numbers: @@ -oldStart,oldCount +newStart,newCount @@
+      if (line.startsWith("@@")) {
+        const match = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+        if (match) {
+          currentLine = parseInt(match[1], 10);
+        }
+        continue;
+      }
+      
+      // Skip other diff headers
+      if (line.startsWith("diff --git") || 
+          line.startsWith("index ") || 
+          line.startsWith("---") || 
+          line.startsWith("+++")) {
+        continue;
+      }
+      
+      // Added lines (new code) - include with line number
+      if (line.startsWith("+")) {
+        result.push(`${currentLine}: ${line.slice(1)}`);
+        currentLine++;
+      }
+      // Context lines (unchanged) - include with line number
+      else if (line.startsWith(" ")) {
+        result.push(`${currentLine}: ${line.slice(1)}`);
+        currentLine++;
+      }
+      // Removed lines - skip but don't increment (they're not in new file)
+      // Other lines (empty, etc.) - skip
+    }
+    
+    return result.join("\n");
   }
 }

@@ -2,6 +2,7 @@ import { IIntentStore } from "../core/store";
 import { IAttributionSource, AttributionSpan } from "../core/attribution-source";
 import { IntentNode, IntentLink, createIntentLink } from "../models/intent";
 import { SourceReference } from "../core/intent-source";
+import { ConversationLoader } from "../core/intent-mesh-core";
 
 /**
  * Links intents to code based on:
@@ -11,7 +12,8 @@ import { SourceReference } from "../core/intent-source";
 export class IntentLinker {
   constructor(
     private readonly store: IIntentStore,
-    private readonly attributionSource: IAttributionSource
+    private readonly attributionSource: IAttributionSource,
+    private readonly conversationLoader?: ConversationLoader
   ) {}
 
   /**
@@ -20,25 +22,34 @@ export class IntentLinker {
   async linkIntentByConversation(intent: IntentNode): Promise<IntentLink[]> {
     const links: IntentLink[] = [];
 
-    // Get all conversation URLs from the intent's sources
-    const conversationUrls = this.extractConversationUrls(intent.sources);
+    // Get conversation IDs from the intent's sources
+    const conversationIds = this.extractConversationIds(intent.sources);
     
-    if (conversationUrls.length === 0) {
+    if (conversationIds.length === 0 || !this.conversationLoader) {
       return links;
     }
 
-    // Check if attribution source is available
-    if (!(await this.attributionSource.isAvailable())) {
-      return links;
+    // Use conversation loader to find files and ranges
+    for (const conversationId of conversationIds) {
+      try {
+        const fileRanges = await (this.conversationLoader as any).getFileRangesForConversation?.(conversationId);
+        
+        if (fileRanges && Array.isArray(fileRanges)) {
+          for (const range of fileRanges) {
+            const link = await this.createLink(
+              intent.id,
+              `file://${range.filePath}`,
+              range.startLine,
+              range.endLine,
+              `Auto-linked from conversation ${conversationId}`
+            );
+            links.push(link);
+          }
+        }
+      } catch (error) {
+        // Conversation loader error - continue silently
+      }
     }
-
-    // This is a simplified approach - in production, we'd scan all files
-    // For MVP, we'll rely on the attribution source being pre-loaded
-    await this.attributionSource.refresh();
-
-    // We need to iterate over files that have attribution
-    // For now, this is a placeholder - the actual implementation would
-    // need access to workspace files
     
     return links;
   }
@@ -105,15 +116,19 @@ export class IntentLinker {
     });
   }
 
-  private extractConversationUrls(sources: SourceReference[]): string[] {
-    const urls: string[] = [];
+  private extractConversationIds(sources: SourceReference[]): string[] {
+    const ids: string[] = [];
     
     for (const source of sources) {
       if (source.uri && source.sourceType === "conversation") {
-        urls.push(source.uri);
+        // Extract ID from cursor://composer/xxx format
+        const match = source.uri.match(/cursor:\/\/composer\/([a-f0-9-]+)/i);
+        if (match) {
+          ids.push(match[1]);
+        }
       }
     }
     
-    return urls;
+    return ids;
   }
 }

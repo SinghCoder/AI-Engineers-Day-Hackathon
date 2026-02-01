@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const ExtractedIntentSchema = z.object({
   title: z.string().min(3).max(50).describe("Short descriptive name (2-5 words)"),
-  statement: z.string().min(10).max(200).describe("Requirement statement: 'System must...', 'Only...', or 'Field must...'"),
+  statement: z.string().min(10).max(500).describe("Requirement statement: 'System must...', 'Only...', or 'Field must...' (keep concise, under 500 chars)"),
   confidence: z.enum(["high"]).describe("Only 'high' confidence - user must explicitly state the requirement"),
   evidence: z.string().describe("Exact quote from USER message only, not assistant response"),
   tags: z.array(z.string()).min(1).max(3).describe("1-3 tags from: auth, security, validation, business-logic, data, access-control"),
