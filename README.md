@@ -1,5 +1,13 @@
 # IntentMesh
 
+
+
+https://github.com/user-attachments/assets/0a82a3ed-fdba-4b2f-be0a-a53e35379ae2
+
+
+
+[Slides](https://docs.google.com/presentation/d/1UAvlUXGfmit-H7wNrh8YWmkyUmx04ybL5lhnMHn1stA/edit?slide=id.g3bc903d2ed0_0_0#slide=id.g3bc903d2ed0_0_0)
+
 **The Semantic Linter for the Agent Coding Era**
 
 > AI writes code fast. Who remembers why?  
